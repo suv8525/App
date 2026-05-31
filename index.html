@@ -3269,6 +3269,13 @@ function fmt(dateStr) {
   return `${day} ${month}, ${dayName}`;
 }
 
+// FCR/SGR date: no day name, just date
+function fmtD(dateStr) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr + (dateStr.length === 10 ? 'T00:00:00' : ''));
+  return d.getDate() + ' ' + BN_MONTHS[d.getMonth()];
+}
+
 function fmtShort(dateStr) {
   if (!dateStr) return '—';
   const d = new Date(dateStr + (dateStr.length === 10 ? 'T00:00:00' : ''));
@@ -5424,10 +5431,24 @@ function openReport(){
   if(!rFirmId && S.firms.length>0) rFirmId = S.firms[0].id;
   buildFirmRow();
   if(!feedFrom){ feedFrom=dAgo(7);  feedTo=tod(); }
-  if(!costFrom){ costFrom=dAgo(30); costTo=tod(); }
+  // Cost start date = first stock entry date for this firm
+  if(!costFrom){
+    var firstStock = (S.stockEvents||[])
+      .filter(function(ev){ return ev.firmId===rFirmId && ev.type==='নতুন চারা ছাড়া'; })
+      .map(function(ev){ return ev.date; })
+      .sort()[0];
+    costFrom = firstStock || dAgo(30);
+    costTo = tod();
+  }
   renderTab();
 }
 
+
+function resetCostDate(){
+  // Reset so next openReport picks up new firm's first stock date
+  costFrom = '';
+  costTo = '';
+}
 
 function buildFirmRow(){
   var row=document.getElementById('rpt-firm-row');
@@ -5441,6 +5462,7 @@ function buildFirmRow(){
 
 function setFirm(el, id){
   rFirmId = id;
+  resetCostDate();
   document.querySelectorAll('#rpt-firm-row .firm-chip').forEach(function(c){c.classList.remove('active');});
   if(el && el.classList) el.classList.add('active');
   renderTab();
@@ -5743,48 +5765,57 @@ function renderFeedPredictionCard(firmId) {
   var lastDate = lastRec.date;
   var K = lastBiomass * 3; // logistic ceiling
 
-  var resultHtml = '';
-  if (savedDate && savedDate > lastDate && avgRate > 0 && avgSgrR !== 0) {
-    var dAhead = daysBetween(lastDate, savedDate);
-    // Integrate feed: sum daily feed = avgRate * B(t) * dt
-    // B(t) = K / (1 + ((K-B0)/B0)*exp(-r*t))
-    var totalPredFeed = 0;
+  // today
+  var todayStr = tod();
+
+  // Calculate feed needed from lastDate to endDate using logistic biomass growth
+  function calcFeedNeeded(endDate) {
+    if (!endDate || endDate <= lastDate) return null;
+    var dEnd = daysBetween(lastDate, endDate);
+    if (dEnd <= 0) return null;
     var B0 = lastBiomass;
-    for (var t=1; t<=dAhead; t++) {
-      var Bt = K / (1 + ((K-B0)/B0)*Math.exp(-avgSgrR*t));
-      totalPredFeed += avgRate * Bt;
+    var total = 0;
+    for (var t = 1; t <= dEnd; t++) {
+      var Bt = K / (1 + ((K-B0)/B0) * Math.exp(-avgSgrR*t));
+      total += avgRate * Math.max(Bt, B0*0.1);
     }
-    totalPredFeed = parseFloat(totalPredFeed.toFixed(1));
-    var alreadyFed = parseFloat(feedBetween(nextDayStr(lastDate), savedDate).toFixed(1));
-    var remaining = parseFloat(Math.max(0, totalPredFeed - alreadyFed).toFixed(1));
-    resultHtml = '<div style="margin-top:12px;padding:12px;background:rgba(0,143,107,0.08);border-radius:var(--radius-sm);border:1px solid rgba(0,143,107,0.2)">'
-      +'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">'
-      +'<span style="font-size:12px;color:var(--text2)">মোট প্রয়োজনীয় Feed</span>'
-      +'<span style="font-size:14px;font-weight:700;color:var(--accent)">'+totalPredFeed+' kg</span>'
-      +'</div>'
-      +'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">'
-      +'<span style="font-size:12px;color:var(--text2)">ইতিমধ্যে দেওয়া হয়েছে</span>'
-      +'<span style="font-size:14px;font-weight:700;color:var(--text)">'+alreadyFed+' kg</span>'
-      +'</div>'
-      +'<div style="display:flex;justify-content:space-between;padding:4px 0">'
-      +'<span style="font-size:12px;font-weight:700;color:var(--text2)">আরো দিতে হবে</span>'
-      +'<span style="font-size:16px;font-weight:700;color:var(--warn)">'+remaining+' kg</span>'
-      +'</div>'
-      +'<div style="font-size:10px;color:var(--text3);margin-top:6px">Feed rate: '+avgRate.toFixed(4)+' kg/kg biomass/day &nbsp;·&nbsp; '+dAhead+' দিন &nbsp;·&nbsp; শেষ biomass: '+lastBiomass.toFixed(1)+' kg</div>'
-      +'</div>';
-  } else if (savedDate && savedDate <= lastDate) {
-    resultHtml = '<div style="font-size:12px;color:#e05050;margin-top:8px">শেষ পরিমাপের তারিখ ('+fmt(lastDate)+') এর পরের তারিখ দিন।</div>';
-  } else if (savedDate && (avgRate<=0||avgSgrR===0)) {
-    resultHtml = '<div style="font-size:12px;color:var(--text3);margin-top:8px">পর্যাপ্ত ডেটা নেই। আরো Feed ও Weight record দিন।</div>';
+    return parseFloat(total.toFixed(1));
   }
 
-  return mkCard('🔮','ri-slate','Feed Consumption Prediction','Biomass-based non-linear logistic model',
-    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">শেষ পরিমাপ: <strong style="color:var(--text)">'+fmt(lastDate)+'</strong> &nbsp;·&nbsp; Biomass: <strong style="color:var(--accent)">'+lastBiomass.toFixed(1)+' kg</strong></div>'
-    +'<div style="display:flex;align-items:center;gap:10px">'
-    +'<span style="font-size:12px;font-weight:600;color:var(--text2);white-space:nowrap">কোন তারিখ পর্যন্ত?</span>'
-    +'<input type="date" id="'+inputId+'" value="'+(savedDate||'')+'" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border2);background:var(--card2);color:var(--text);font-size:13px;font-family:inherit" onchange="saveFeedPredDate(\''+firmId+'\',this.value)">'
+  function resultBlock(label, endDate) {
+    if (!endDate) return '';
+    if (avgRate <= 0 || avgSgrR === 0) {
+      return '<div style="font-size:12px;color:var(--text3);margin-top:4px">পর্যাপ্ত ডেটা নেই।</div>';
+    }
+    if (endDate <= lastDate) {
+      return '<div style="font-size:12px;color:#e05050;margin-top:4px">শেষ পরিমাপের ('+fmtD(lastDate)+') পরের তারিখ দিন।</div>';
+    }
+    var feed = calcFeedNeeded(endDate);
+    if (feed === null) return '';
+    var days = daysBetween(lastDate, endDate);
+    return '<div style="padding:8px 10px;background:rgba(0,143,107,0.08);border-radius:8px;border:1px solid rgba(0,143,107,0.2);margin-top:6px">'
+      +'<div style="display:flex;justify-content:space-between;align-items:center">'
+      +'<span style="font-size:11px;color:var(--text2)">'+label+'</span>'
+      +'<span style="font-size:15px;font-weight:700;color:var(--accent)">'+feed+' kg</span>'
+      +'</div>'
+      +'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+days+' দিন &nbsp;·&nbsp; Biomass: '+lastBiomass.toFixed(1)+' kg &nbsp;·&nbsp; Rate: '+avgRate.toFixed(4)+' kg/kg/day</div>'
+      +'</div>';
+  }
+
+  var todayBlock  = resultBlock('আজ পর্যন্ত প্রয়োজনীয় Feed', todayStr);
+  var targetBlock = savedDate ? resultBlock('লক্ষ্য তারিখ পর্যন্ত Feed', savedDate) : '';
+
+  return mkCard('\ud83d\udd2e','ri-slate','Feed Consumption Prediction','Biomass-based non-linear logistic model',
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">'
+    +'শেষ পরিমাপ: <strong style="color:var(--text)">'+fmtD(lastDate)+'</strong>'
+    +' \u00a0·\u00a0 Biomass: <strong style="color:var(--accent)">'+lastBiomass.toFixed(1)+' kg</strong>'
     +'</div>'
-    + resultHtml
+    + todayBlock
+    +'<div style="display:flex;align-items:center;gap:10px;margin-top:10px">'
+    +'<span style="font-size:12px;font-weight:600;color:var(--text2);white-space:nowrap">লক্ষ্য তারিখ:</span>'
+    +'<input type="date" id="'+inputId+'" value="'+(savedDate||'')+'" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border2);background:var(--card2);color:var(--text);font-size:13px;font-family:inherit" data-firmid="'+firmId+'" class="feed-pred-date-inp">'
+    +'</div>'
+    + targetBlock
   );
 }
 
@@ -5966,6 +5997,22 @@ function saveMedCost(type,val){
   if(!S.medCosts[rFirmId])S.medCosts[rFirmId]={};
   S.medCosts[rFirmId][type]=parseFloat(val)||0;save();renderCost();
 }
+
+// Event delegation for feed prediction date input
+document.addEventListener('change', function(e){
+  if (e.target.classList.contains('feed-pred-date-inp')) {
+    var fid = e.target.dataset.firmid || '';
+    if (fid) saveFeedPredDate(fid, e.target.value);
+  }
+}, true);
+
+// Event delegation for SGR fish selector
+document.addEventListener('click', function(e){
+  if (e.target.classList.contains('sgr-fish-btn')) {
+    var enc = e.target.dataset.sgrfish || '';
+    if (enc) setSgrFish(enc);
+  }
+}, true);
 
 // Event delegation for cost inputs (handles Bengali/special chars in feed/med names)
 document.addEventListener('blur', function(e){
@@ -6576,7 +6623,7 @@ function buildBiomassChart(wtRecs, biomassAtRec) {
   var xLabels = xDayLabels.map(function(d){
     var dateMs = d0ms + d*86400000;
     var dateStr = new Date(dateMs).toISOString().slice(0,10);
-    return '<text x="'+px(d)+'" y="'+(H-4)+'" text-anchor="middle" font-size="7.5" fill="rgba(150,150,150,0.7)">'+fmt(dateStr)+'</text>';
+    return '<text x="'+px(d)+'" y="'+(H-4)+'" text-anchor="middle" font-size="7.5" fill="rgba(150,150,150,0.7)">'+fmtD(dateStr)+'</text>';
   }).join('');
 
   // Vertical line at last actual data
@@ -6599,6 +6646,141 @@ function buildBiomassChart(wtRecs, biomassAtRec) {
     +'<line x1="'+PAD.l+'" y1="'+PAD.t+'" x2="'+PAD.l+'" y2="'+(PAD.t+cH)+'" stroke="rgba(150,150,150,0.4)"/>'
     +'<line x1="'+PAD.l+'" y1="'+(PAD.t+cH)+'" x2="'+(W-PAD.r)+'" y2="'+(PAD.t+cH)+'" stroke="rgba(150,150,150,0.4)"/>'
     +'<text x="12" y="'+(H/2)+'" text-anchor="middle" font-size="8" fill="rgba(150,150,150,0.6)" transform="rotate(-90,12,'+(H/2)+')">kg</text>'
+    +'</svg></div>';
+}
+
+// ── Per-fish wpp chart for SGR ──
+function buildFishWppChart(fishName, wtRecs, initialWppFn) {
+  if (!wtRecs || wtRecs.length < 1) return '';
+
+  var d0ms = new Date(wtRecs[0].date).getTime();
+  function daysFrom0(dateStr) { return Math.round((new Date(dateStr).getTime()-d0ms)/86400000); }
+
+  // Collect observations for this fish
+  var obs = [];
+  // Initial stock point
+  var initWpp = initialWppFn(fishName);
+  if (initWpp > 0) {
+    // find stock date
+    var stockEvts = (S.stockEvents||[]).filter(function(ev){
+      return ev.firmId === rFirmId && ev.type === 'নতুন চারা ছাড়া';
+    }).sort(function(a,b){ return a.date.localeCompare(b.date); });
+    if (stockEvts.length > 0) {
+      var stockDay = Math.round((new Date(stockEvts[0].date).getTime()-d0ms)/86400000);
+      obs.push({ day: stockDay, wpp: initWpp, date: stockEvts[0].date, isStock: true });
+    }
+  }
+
+  wtRecs.forEach(function(r) {
+    (r.entries||[]).forEach(function(e) {
+      if (e.fishName !== fishName) return;
+      var wpp = e.weightPerPcs || (e.pcsPerKg>0 ? 1/e.pcsPerKg : 0);
+      if (wpp > 0) obs.push({ day: daysFrom0(r.date), wpp: wpp, date: r.date });
+    });
+  });
+
+  if (obs.length < 1) return '<div style="text-align:center;padding:12px;color:var(--text3);font-size:12px">'+fishName+' এর ওজন তথ্য নেই</div>';
+
+  obs.sort(function(a,b){ return a.day - b.day; });
+
+  // Interpolate between points
+  var firstDay = obs[0].day;
+  var lastDay = obs[obs.length-1].day;
+  var totalDays = Math.max(lastDay - firstDay, 1);
+
+  // Logistic prediction +21 days
+  var w0 = obs[0].wpp, wN = obs[obs.length-1].wpp;
+  var K = wN * 3;
+  var rEst = 0.01;
+  if (obs.length >= 2) {
+    var rVals = [];
+    for (var i = 1; i < obs.length; i++) {
+      var dd = obs[i].day - obs[i-1].day;
+      if (dd > 0 && obs[i-1].wpp > 0 && obs[i].wpp > 0) {
+        rVals.push((Math.log(obs[i].wpp) - Math.log(obs[i-1].wpp)) / dd);
+      }
+    }
+    if (rVals.length) rEst = rVals.reduce(function(a,b){return a+b;})/rVals.length;
+  }
+
+  var predEnd = lastDay + 21;
+  var allDays = [];
+  for (var d = firstDay; d <= predEnd; d++) allDays.push(d);
+
+  var predWpps = allDays.map(function(d) {
+    var t = d - lastDay;
+    if (t <= 0) return null;
+    return K / (1 + ((K-wN)/wN) * Math.exp(-rEst*t));
+  });
+
+  // SVG
+  var W=320, H=160, PAD={t:20,r:20,b:32,l:46};
+  var cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
+
+  var allWpps = obs.map(function(o){return o.wpp;}).concat(predWpps.filter(Boolean));
+  var maxWpp = Math.max.apply(null, allWpps) * 1.15 || 0.01;
+  var minWpp = Math.min.apply(null, allWpps) * 0.85;
+  var wRange = maxWpp - minWpp || 0.001;
+
+  function px(d){ return PAD.l + (d - firstDay) / (predEnd - firstDay) * cW; }
+  function py(w){ return PAD.t + cH * (1 - (w - minWpp) / wRange); }
+
+  // Actual line through obs points
+  var actLine = obs.map(function(o,i){ return (i===0?'M':'L')+px(o.day)+','+py(o.wpp); }).join(' ');
+
+  // Prediction line
+  var predLine = '';
+  for (var i = 0; i < allDays.length; i++) {
+    if (predWpps[i] === null) continue;
+    var prefix = predLine === '' ? 'M' : 'L';
+    predLine += prefix + px(allDays[i]) + ',' + py(predWpps[i]) + ' ';
+  }
+  // Connect last actual to first pred
+  var connLine = 'M'+px(lastDay)+','+py(wN);
+  if (predLine) connLine += ' ' + predLine.trim().replace(/^M/, 'L');
+
+  // Dots for obs
+  var dots = obs.map(function(o) {
+    var gm = (o.wpp*1000).toFixed(1);
+    var col = o.isStock ? 'var(--text3)' : 'var(--accent)';
+    return '<circle cx="'+px(o.day)+'" cy="'+py(o.wpp)+'" r="3.5" fill="'+col+'" stroke="#fff" stroke-width="1"/>'
+      +'<text x="'+px(o.day)+'" y="'+(py(o.wpp)-7)+'" text-anchor="middle" font-size="8" fill="rgba(0,168,126,0.9)">'+gm+' gm</text>';
+  }).join('');
+
+  // Y grid (in gm)
+  var yGrid = '';
+  var yTicks = [minWpp, minWpp+wRange*0.25, minWpp+wRange*0.5, minWpp+wRange*0.75, maxWpp];
+  yTicks.forEach(function(v) {
+    var y = py(v);
+    yGrid += '<line x1="'+PAD.l+'" y1="'+y+'" x2="'+(W-PAD.r)+'" y2="'+y+'" stroke="rgba(150,150,150,0.15)"/>';
+    yGrid += '<text x="'+(PAD.l-3)+'" y="'+(y+3)+'" text-anchor="end" font-size="8" fill="rgba(150,150,150,0.6)">'+(v*1000).toFixed(0)+'</text>';
+  });
+
+  // X labels
+  var xPts = [firstDay, Math.round(firstDay+totalDays/2), lastDay, predEnd];
+  var xLabels = xPts.map(function(d) {
+    var dateMs = d0ms + d*86400000;
+    var dateStr = new Date(dateMs).toISOString().slice(0,10);
+    return '<text x="'+px(d)+'" y="'+(H-3)+'" text-anchor="middle" font-size="7.5" fill="rgba(150,150,150,0.7)">'+fmtD(dateStr)+'</text>';
+  }).join('');
+
+  // Vertical line at last actual
+  var vLine = '<line x1="'+px(lastDay)+'" y1="'+PAD.t+'" x2="'+px(lastDay)+'" y2="'+(PAD.t+cH)+'" stroke="rgba(150,150,150,0.4)" stroke-dasharray="4,3"/>';
+  var vLabel = '<text x="'+(px(lastDay)+3)+'" y="'+(PAD.t+10)+'" font-size="7" fill="rgba(150,150,150,0.6)">আজ পর্যন্ত</text>';
+
+  return '<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'
+    +'<div style="font-size:10px;color:var(--text3)"><span style="color:var(--accent)">● '+fishName+'</span> &nbsp; <span style="opacity:0.5;color:var(--warn)">- - - পূর্বাভাস</span></div>'
+    +'<div style="font-size:9px;color:var(--text3)">ওজন/পিস (gm)</div>'
+    +'</div>'
+    +'<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:'+W+'px;overflow:visible" xmlns="http://www.w3.org/2000/svg">'
+    +yGrid
+    +'<path d="'+connLine+'" fill="none" stroke="rgba(255,169,77,0.6)" stroke-width="1.5" stroke-dasharray="5,3"/>'
+    +'<path d="'+actLine+'" fill="none" stroke="var(--accent)" stroke-width="2"/>'
+    +dots+vLine+vLabel+xLabels
+    +'<line x1="'+PAD.l+'" y1="'+PAD.t+'" x2="'+PAD.l+'" y2="'+(PAD.t+cH)+'" stroke="rgba(150,150,150,0.4)"/>'
+    +'<line x1="'+PAD.l+'" y1="'+(PAD.t+cH)+'" x2="'+(W-PAD.r)+'" y2="'+(PAD.t+cH)+'" stroke="rgba(150,150,150,0.4)"/>'
+    +'<text x="12" y="'+(H/2)+'" text-anchor="middle" font-size="8" fill="rgba(150,150,150,0.6)" transform="rotate(-90,12,'+(H/2)+')">gm</text>'
     +'</svg></div>';
 }
 
@@ -6756,7 +6938,8 @@ function renderAnalytics() {
       var fcr0  = (gain0 > 0 && feed0 > 0) ? parseFloat((feed0/gain0).toFixed(2)) : null;
       var color0 = fcr0===null?'var(--text3)':fcr0<=1.5?'var(--accent)':fcr0<=2.5?'var(--warn)':'#e05050';
       grandFeed += feed0; grandGain += Math.max(0, gain0);
-      rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmt(stockDate0)+' → '+fmt(wtRecs[0].date)+'</td>'
+      var days0str = daysBetween(stockDate0, wtRecs[0].date)+' দিন';
+      rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmtD(stockDate0)+' → '+fmtD(wtRecs[0].date)+' · '+days0str+'</td>'
         +'<td class="r">'+feed0+' kg</td>'
         +'<td class="r">'+(gain0>0?'+':'')+gain0+' kg</td>'
         +'<td class="r" style="font-weight:700;color:'+color0+'">'+(fcr0!==null?fcr0:'—')+'</td></tr>';
@@ -6774,7 +6957,8 @@ function renderAnalytics() {
       var color = fcr===null?'var(--text3)':fcr<=1.5?'var(--accent)':fcr<=2.5?'var(--warn)':'#e05050';
       grandFeed += feed; grandGain += Math.max(0,gain);
       fcrData.push({ label: fmt(r1.date), fcr: fcr, color: color });
-      rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmt(r0.date)+' → '+fmt(r1.date)+'</td>'
+      var daysStr = daysBetween(r0.date, r1.date)+' দিন';
+      rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmtD(r0.date)+' → '+fmtD(r1.date)+' · '+daysStr+'</td>'
         +'<td class="r">'+feed+' kg</td>'
         +'<td class="r">'+(gain>0?'+':'')+gain+' kg</td>'
         +'<td class="r" style="font-weight:700;color:'+color+'">'+(fcr!==null?fcr:'—')+'</td></tr>';
@@ -6800,47 +6984,116 @@ function renderAnalytics() {
 
   // ─────────────────────────────────────────────
   // 2. SGR — Specific Growth Rate (% per day)
+  //    Per-fish, wpp-based (pcs change does not affect SGR)
   // ─────────────────────────────────────────────
-  var sgrHtml = '';
-  if (wtRecs.length >= 1) {
-    var sgrRows = '';
-    var sgrSum = 0, sgrCount = 0;
 
-    // ── Period 0: stock entry → first weight record ──
-    var stockDate0sgr = firstStockDate();
-    if (stockDate0sgr) {
-      var sb0 = initialBiomassAt(stockDate0sgr);
-      var sb1 = biomassAtIdx(0);
-      var sdays0 = daysBetween(stockDate0sgr, wtRecs[0].date);
-      var sgr0 = (sb0>0 && sb1>0 && sdays0>0) ? parseFloat(((Math.log(sb1)-Math.log(sb0))/sdays0*100).toFixed(3)) : null;
-      var sc0 = sgr0===null?'var(--text3)':sgr0>=1?'var(--accent)':sgr0>=0.5?'var(--warn)':'#e05050';
-      if (sgr0!==null) { sgrSum+=sgr0; sgrCount++; }
-      sgrRows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmt(stockDate0sgr)+' → '+fmt(wtRecs[0].date)+'</td>'
-        +'<td class="r">'+sdays0+' দিন</td>'
-        +'<td class="r">'+sb0.toFixed(1)+' → '+sb1.toFixed(1)+' kg</td>'
-        +'<td class="r" style="font-weight:700;color:'+sc0+'">'+(sgr0!==null?sgr0+'%':'—')+'</td></tr>';
+  // ── Helper: get wpp for a fish at a weight record index (carry-forward) ──
+  function wppForFishAt(fishName, idx) {
+    // scan weight records up to idx for this fish
+    for (var ii = idx; ii >= 0; ii--) {
+      var entries = wtRecs[ii].entries || [];
+      for (var ei = 0; ei < entries.length; ei++) {
+        var e = entries[ei];
+        if (e.fishName === fishName) {
+          return e.weightPerPcs || (e.pcsPerKg > 0 ? 1/e.pcsPerKg : 0);
+        }
+      }
+    }
+    return 0; // not yet measured
+  }
+
+  // ── Helper: get initial wpp for a fish from stock entry ──
+  function initialWppForFish(fishName) {
+    return getInitialWppFromStock(fishName, wtRecs.length > 0 ? wtRecs[0].date : '9999');
+  }
+
+  // ── Build SGR for a specific fish ──
+  function buildSgrForFish(fishName) {
+    var rows = '';
+    var sgrSum = 0, sgrCount = 0;
+    var stockDate = firstStockDate();
+
+    // Period 0: stock → first weight record
+    if (stockDate && wtRecs.length > 0) {
+      var wpp0 = initialWppForFish(fishName);
+      var wpp1 = wppForFishAt(fishName, 0);
+      var sdays0 = daysBetween(stockDate, wtRecs[0].date);
+      if (wpp0 > 0 && wpp1 > 0 && sdays0 > 0) {
+        var sgr0 = parseFloat(((Math.log(wpp1) - Math.log(wpp0)) / sdays0 * 100).toFixed(3));
+        var sc0 = sgr0>=1?'var(--accent)':sgr0>=0.5?'var(--warn)':'#e05050';
+        sgrSum += sgr0; sgrCount++;
+        var wGm0s = (wpp0*1000).toFixed(1)+' gm';
+        var wGm1s = (wpp1*1000).toFixed(1)+' gm';
+        rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmtD(stockDate)+' → '+fmtD(wtRecs[0].date)+' · '+sdays0+' দিন</td>'
+          +'<td class="r">'+sdays0+' দিন</td>'
+          +'<td class="r">'+wGm0s+' → '+wGm1s+'</td>'
+          +'<td class="r" style="font-weight:700;color:'+sc0+'">'+sgr0+'%</td></tr>';
+      } else if (wpp0 > 0 && wpp1 === 0) {
+        // fish not measured in first record
+        rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmtD(stockDate)+' → '+fmtD(wtRecs[0].date)+' · '+sdays0+' দিন</td>'
+          +'<td class="r">'+sdays0+' দিন</td>'
+          +'<td class="r" colspan="2" style="color:var(--text3)">ওজন নেওয়া হয়নি</td></tr>';
+      }
     }
 
-    // ── Periods: weight record → weight record ──
+    // Periods: weight record → weight record
     for (var i = 1; i < wtRecs.length; i++) {
       var r0 = wtRecs[i-1], r1 = wtRecs[i];
-      var b0 = biomassAtIdx(i-1), b1 = biomassAtIdx(i);
+      var wA = wppForFishAt(fishName, i-1);
+      var wB = wppForFishAt(fishName, i);
       var days = daysBetween(r0.date, r1.date);
-      var sgr = (b0>0 && b1>0 && days>0) ? parseFloat(((Math.log(b1)-Math.log(b0))/days*100).toFixed(3)) : null;
-      var sc = sgr===null?'var(--text3)':sgr>=1?'var(--accent)':sgr>=0.5?'var(--warn)':'#e05050';
-      if (sgr!==null) { sgrSum+=sgr; sgrCount++; }
-      sgrRows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmt(r0.date)+' → '+fmt(r1.date)+'</td>'
-        +'<td class="r">'+days+' দিন</td>'
-        +'<td class="r">'+b0.toFixed(1)+' → '+b1.toFixed(1)+' kg</td>'
-        +'<td class="r" style="font-weight:700;color:'+sc+'">'+(sgr!==null?sgr+'%':'—')+'</td></tr>';
+      if (wA > 0 && wB > 0 && days > 0) {
+        var sgr = parseFloat(((Math.log(wB) - Math.log(wA)) / days * 100).toFixed(3));
+        var sc = sgr>=1?'var(--accent)':sgr>=0.5?'var(--warn)':'#e05050';
+        sgrSum += sgr; sgrCount++;
+        var wGmA = (wA*1000).toFixed(1)+' gm';
+        var wGmB = (wB*1000).toFixed(1)+' gm';
+        rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmtD(r0.date)+' → '+fmtD(r1.date)+' · '+days+' দিন</td>'
+          +'<td class="r">'+days+' দিন</td>'
+          +'<td class="r">'+wGmA+' → '+wGmB+'</td>'
+          +'<td class="r" style="font-weight:700;color:'+sc+'">'+sgr+'%</td></tr>';
+      } else {
+        rows += '<tr><td style="font-size:11px;color:var(--text3)">'+fmtD(r0.date)+' → '+fmtD(r1.date)+' · '+days+' দিন</td>'
+          +'<td class="r">'+days+' দিন</td>'
+          +'<td class="r" colspan="2" style="color:var(--text3)">ওজন নেওয়া হয়নি</td></tr>';
+      }
     }
-    var avgSgrVal = sgrCount>0 ? parseFloat((sgrSum/sgrCount).toFixed(3)) : null;
-    var avgSgrColor = avgSgrVal===null?'var(--text3)':avgSgrVal>=1?'var(--accent)':avgSgrVal>=0.5?'var(--warn)':'#e05050';
-    sgrRows += '<tr class="sum-row"><td>গড় SGR</td><td class="r"></td><td class="r"></td>'
-      +'<td class="r" style="color:'+avgSgrColor+'">'+(avgSgrVal!==null?avgSgrVal+'%':'—')+'</td></tr>';
+
+    var avgSgr = sgrCount > 0 ? parseFloat((sgrSum/sgrCount).toFixed(3)) : null;
+    var avgColor = avgSgr===null?'var(--text3)':avgSgr>=1?'var(--accent)':avgSgr>=0.5?'var(--warn)':'#e05050';
+    rows += '<tr class="sum-row"><td>গড় SGR</td><td class="r"></td><td class="r"></td>'
+      +'<td class="r" style="color:'+avgColor+'">'+(avgSgr!==null?avgSgr+'%':'—')+'</td></tr>';
+    return rows;
+  }
+
+  // ── SGR Fish Selector & Render ──
+  var sgrHtml = '';
+  if (wtRecs.length >= 1) {
+    var allFishList = getFishTypes(firm);
+    // default: first fish that has at least one weight record
+    var defaultFish = allFishList[0] || '';
+    for (var fi = 0; fi < allFishList.length; fi++) {
+      var hasW = wtRecs.some(function(r){ return (r.entries||[]).some(function(e){ return e.fishName===allFishList[fi]; }); });
+      if (hasW) { defaultFish = allFishList[fi]; break; }
+    }
+
+    var sgrFishSel = S._sgrSelectedFish && S._sgrSelectedFish[rFirmId] || defaultFish;
+    if (allFishList.indexOf(sgrFishSel) < 0) sgrFishSel = defaultFish;
+
+    var fishBtns = allFishList.map(function(name) {
+      var active = name === sgrFishSel;
+      var enc = encodeURIComponent(name);
+      return '<button data-sgrfish="'+enc+'" class="sgr-fish-btn" '
+        +'style="padding:5px 12px;border-radius:20px;border:1.5px solid '+(active?'var(--accent)':'var(--border)')+';'
+        +'background:'+(active?'var(--accent)':'transparent')+';color:'+(active?'#fff':'var(--text2)')+';'
+        +'font-size:12px;cursor:pointer;margin:2px;">'+name+'</button>';
+    }).join('');
+
+    var sgrTableRows = buildSgrForFish(sgrFishSel);
     sgrHtml = mkCard('📈','ri-teal','SGR — Specific Growth Rate','দৈনিক গড় বৃদ্ধির হার',
-      '<div class="tbl-wrap"><table class="data-tbl"><thead><tr><th>সময়কাল</th><th class="r">দিন</th><th class="r">Biomass</th><th class="r">SGR</th></tr></thead><tbody>'+sgrRows+'</tbody></table></div>'
-      + buildBiomassChart(wtRecs, biomassAtRec)
+      '<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:4px;">'+fishBtns+'</div>'
+      +'<div class="tbl-wrap"><table class="data-tbl"><thead><tr><th>সময়কাল</th><th class="r">দিন</th><th class="r">ওজন/পিস</th><th class="r">SGR</th></tr></thead><tbody>'+sgrTableRows+'</tbody></table></div>'
+      + buildFishWppChart(sgrFishSel, wtRecs, initialWppForFish)
     );
   } else {
     sgrHtml = mkCard('📈','ri-teal','SGR — Specific Growth Rate','দৈনিক গড় বৃদ্ধির হার',
@@ -7059,6 +7312,13 @@ function saveHarvestTarget(fishName, val) {
   if (!S.harvestTargets[rFirmId]) S.harvestTargets[rFirmId] = {};
   S.harvestTargets[rFirmId][fishName] = parseFloat(val) || 0;
   save();
+  renderAnalytics();
+}
+
+function setSgrFish(encodedName) {
+  var name = decodeURIComponent(encodedName);
+  if (!S._sgrSelectedFish) S._sgrSelectedFish = {};
+  S._sgrSelectedFish[rFirmId] = name;
   renderAnalytics();
 }
 
