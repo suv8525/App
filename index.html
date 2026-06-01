@@ -1455,7 +1455,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Sora',
 .problem-input::placeholder{color:var(--text3);}
 .char-count{text-align:right;font-size:11px;color:var(--text3);margin-top:5px;}
 .med-rows-wrap{display:flex;flex-direction:column;}
-.med-item{display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);}
+.med-item{display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--border);}
 .med-item:last-child{border-bottom:none;padding-bottom:2px;}
 .med-item:first-child{padding-top:2px;}
 .med-num{width:24px;height:24px;border-radius:50%;background:rgba(255,169,77,0.1);border:1px solid rgba(255,169,77,0.2);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--warn);flex-shrink:0;}
@@ -3762,7 +3762,7 @@ function navTo(pageId, firmId) {
   if (pageId==='weight-entry' && firmId) openWeightEntry(firmId);
   if (pageId==='stock-entry'  && firmId) openStockEntry(firmId);
   if (pageId==='firm-setup')            openFirmSetup(firmId||null);
-  if (pageId==='history')               { buildFirmFilter(); pull().then(()=>renderHistory()).catch(()=>renderHistory()); }
+  if (pageId==='history')               { buildFirmFilter(); renderHistory(); if(navigator.onLine) setTimeout(()=>pull().then(()=>renderHistoryKeepOpen()).catch(()=>{}), 100); }
   if (pageId==='report')                { openReport(); }
 }
 
@@ -4957,7 +4957,8 @@ function openHistory(){
   buildFirmFilter();
   // Auto pull silently
   setSyncBar(true,'সিঙ্ক হচ্ছে...');setSyncIcon(true);
-  pull().then(()=>{renderHistory();}).catch(()=>{renderHistory();}).finally(()=>{setSyncIcon(false);});
+  renderHistory();
+  pull().then(()=>{renderHistoryKeepOpen();}).catch(()=>{}).finally(()=>{setSyncIcon(false);});
 }
 
 // ═══════════════════════════ FIRM FILTER ═══════════════════════════
@@ -5029,7 +5030,11 @@ function renderHistoryKeepOpen() {
   });
 }
 
-function renderHistory(){
+var _histPage = 0;
+var _HIST_PER_PAGE = 25;
+
+function renderHistory(resetPage){
+  if(resetPage !== false) _histPage = 0;
   _histCards = {};
   const list=document.getElementById('hist-list');
   const emptyEl=document.getElementById('hist-empty');
@@ -5042,8 +5047,38 @@ function renderHistory(){
     return;
   }
   emptyEl.style.display='none';resBar.style.display='flex';
-  cnt.innerHTML='<strong>'+filtered.length+'</strong> টি রেকর্ড';
-  list.innerHTML=filtered.map((r,i)=>buildCard(r,i)).join('');
+
+  var start = _histPage * _HIST_PER_PAGE;
+  var end   = Math.min(start + _HIST_PER_PAGE, filtered.length);
+  var page  = filtered.slice(start, end);
+
+  cnt.innerHTML='<strong>'+filtered.length+'</strong> টি রেকর্ড'
+    +(filtered.length > _HIST_PER_PAGE ? ' &nbsp;·&nbsp; পৃষ্ঠা '+((_histPage)+1)+'/'+Math.ceil(filtered.length/_HIST_PER_PAGE) : '');
+
+  // Build pagination buttons
+  var totalPages = Math.ceil(filtered.length / _HIST_PER_PAGE);
+  var pageBtns = '';
+  if(totalPages > 1){
+    pageBtns = '<div style="display:flex;justify-content:center;gap:8px;margin:12px 0 4px">'
+      +(_histPage > 0 ? '<button onclick="histPrevPage()" style="padding:6px 16px;border-radius:20px;border:1px solid var(--border2);background:var(--card2);color:var(--text2);font-size:13px;cursor:pointer">← আগের</button>' : '')
+      +'<span style="font-size:12px;color:var(--text3);align-self:center">'+(_histPage+1)+' / '+totalPages+'</span>'
+      +(end < filtered.length ? '<button onclick="histNextPage()" style="padding:6px 16px;border-radius:20px;border:1px solid var(--border2);background:var(--card2);color:var(--text2);font-size:13px;cursor:pointer">পরের →</button>' : '')
+      +'</div>';
+  }
+
+  list.innerHTML = page.map((r,i)=>buildCard(r, start+i)).join('') + pageBtns;
+}
+
+function histNextPage(){
+  _histPage++;
+  renderHistory(false);
+  document.getElementById('hist-list').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function histPrevPage(){
+  _histPage = Math.max(0, _histPage-1);
+  renderHistory(false);
+  document.getElementById('hist-list').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
 // ═══════════════════════════ BUILD CARD ═══════════════════════════
@@ -5768,50 +5803,48 @@ function renderFeedPredictionCard(firmId) {
   // today
   var todayStr = tod();
 
-  // Calculate feed needed from lastDate to endDate using logistic biomass growth
+  // Calculate feed needed from TODAY to endDate
   function calcFeedNeeded(endDate) {
-    if (!endDate || endDate <= lastDate) return null;
-    var dEnd = daysBetween(lastDate, endDate);
-    if (dEnd <= 0) return null;
+    if (!endDate || endDate < todayStr) return null;
+    var dToday = daysBetween(lastDate, todayStr);
+    var dEnd   = daysBetween(lastDate, endDate);
+    if (dEnd <= dToday) return null;
     var B0 = lastBiomass;
     var total = 0;
-    for (var t = 1; t <= dEnd; t++) {
+    for (var t = dToday + 1; t <= dEnd; t++) {
       var Bt = K / (1 + ((K-B0)/B0) * Math.exp(-avgSgrR*t));
       total += avgRate * Math.max(Bt, B0*0.1);
     }
     return parseFloat(total.toFixed(1));
   }
 
-  function resultBlock(label, endDate) {
-    if (!endDate) return '';
+  var targetBlock = '';
+  if (savedDate) {
     if (avgRate <= 0 || avgSgrR === 0) {
-      return '<div style="font-size:12px;color:var(--text3);margin-top:4px">পর্যাপ্ত ডেটা নেই।</div>';
+      targetBlock = '<div style="font-size:12px;color:var(--text3);margin-top:6px">পর্যাপ্ত ডেটা নেই।</div>';
+    } else if (savedDate < todayStr) {
+      targetBlock = '<div style="font-size:12px;color:#e05050;margin-top:6px">আজকের পরের তারিখ দিন।</div>';
+    } else {
+      var feed = calcFeedNeeded(savedDate);
+      if (feed !== null) {
+        var days = daysBetween(todayStr, savedDate);
+        targetBlock = '<div style="padding:8px 10px;background:rgba(0,143,107,0.08);border-radius:8px;border:1px solid rgba(0,143,107,0.2);margin-top:6px">'
+          +'<div style="display:flex;justify-content:space-between;align-items:center">'
+          +'<span style="font-size:11px;color:var(--text2)">আজ থেকে লক্ষ্য তারিখ পর্যন্ত Feed</span>'
+          +'<span style="font-size:15px;font-weight:700;color:var(--accent)">'+feed+' kg</span>'
+          +'</div>'
+          +'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+days+' দিন &nbsp;·&nbsp; Biomass: '+lastBiomass.toFixed(1)+' kg &nbsp;·&nbsp; Rate: '+avgRate.toFixed(4)+' kg/kg/day</div>'
+          +'</div>';
+      }
     }
-    if (endDate <= lastDate) {
-      return '<div style="font-size:12px;color:#e05050;margin-top:4px">শেষ পরিমাপের ('+fmtD(lastDate)+') পরের তারিখ দিন।</div>';
-    }
-    var feed = calcFeedNeeded(endDate);
-    if (feed === null) return '';
-    var days = daysBetween(lastDate, endDate);
-    return '<div style="padding:8px 10px;background:rgba(0,143,107,0.08);border-radius:8px;border:1px solid rgba(0,143,107,0.2);margin-top:6px">'
-      +'<div style="display:flex;justify-content:space-between;align-items:center">'
-      +'<span style="font-size:11px;color:var(--text2)">'+label+'</span>'
-      +'<span style="font-size:15px;font-weight:700;color:var(--accent)">'+feed+' kg</span>'
-      +'</div>'
-      +'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+days+' দিন &nbsp;·&nbsp; Biomass: '+lastBiomass.toFixed(1)+' kg &nbsp;·&nbsp; Rate: '+avgRate.toFixed(4)+' kg/kg/day</div>'
-      +'</div>';
   }
-
-  var todayBlock  = resultBlock('আজ পর্যন্ত প্রয়োজনীয় Feed', todayStr);
-  var targetBlock = savedDate ? resultBlock('লক্ষ্য তারিখ পর্যন্ত Feed', savedDate) : '';
 
   return mkCard('\ud83d\udd2e','ri-slate','Feed Consumption Prediction','Biomass-based non-linear logistic model',
     '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">'
     +'শেষ পরিমাপ: <strong style="color:var(--text)">'+fmtD(lastDate)+'</strong>'
     +' \u00a0·\u00a0 Biomass: <strong style="color:var(--accent)">'+lastBiomass.toFixed(1)+' kg</strong>'
     +'</div>'
-    + todayBlock
-    +'<div style="display:flex;align-items:center;gap:10px;margin-top:10px">'
+    +'<div style="display:flex;align-items:center;gap:10px">'
     +'<span style="font-size:12px;font-weight:600;color:var(--text2);white-space:nowrap">লক্ষ্য তারিখ:</span>'
     +'<input type="date" id="'+inputId+'" value="'+(savedDate||'')+'" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border2);background:var(--card2);color:var(--text);font-size:13px;font-family:inherit" data-firmid="'+firmId+'" class="feed-pred-date-inp">'
     +'</div>'
@@ -6089,9 +6122,9 @@ function renderFeedStock(){
 
   // Entry form
   var inputRows = feedTypes.map(function(t,i){
-    return '<div class="med-item">'
+    return '<div class="med-item" style="padding:6px 0;min-height:0">'
       + '<div class="med-num">'+(i+1)+'</div>'
-      + '<div class="med-name-block"><div class="med-name">'+esc(t)+'</div><div class="med-name-en">kg</div></div>'
+      + '<div class="med-name-block"><div class="med-name">'+esc(t)+'</div></div>'
       + '<div class="stepper" id="fstock-stepper-'+i+'">'
       + '<button class="step-btn" onclick="fsStep('+i+',-1)">−</button>'
       + '<input class="step-val" id="fstock-qty-'+i+'" type="number" min="0" step="1" placeholder="০" inputmode="numeric" oninput="fsEnforce('+i+')" onchange="fsEnforce('+i+')">'
