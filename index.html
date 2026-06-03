@@ -3115,7 +3115,7 @@ html, body { height: 100%; overflow: hidden; }
       <div class="modal-handle"></div>
       <div class="modal-title">খামার মুছবেন?</div>
       <div class="modal-desc">
-        <span class="modal-firm-name" id="del-firm-name"></span> খামারটি স্থায়ীভাবে মুছে ফেলা হবে। এই কাজটি ফেরানো যাবে না।
+        <span class="modal-firm-name" id="del-firm-name"></span> খামারটি archive হবে। পরে Settings থেকে পুনরুদ্ধার করা যাবে।
       </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal('modal-delete')">বাতিল</button>
@@ -3307,6 +3307,11 @@ async function load() {
       }
     }
     if (parsed) {
+      // Restore pending queue before merging
+      if (parsed._pendingQueue && parsed._pendingQueue.length > 0) {
+        syncQueue = parsed._pendingQueue;
+        delete parsed._pendingQueue;
+      }
       S = Object.assign(defaults, parsed);
       if (!S.sheetUrl) S.sheetUrl = GAS_URL;
       if (!S.stockEvents) S.stockEvents = [];
@@ -3318,8 +3323,10 @@ async function load() {
 }
 
 function save() {
-  // Returns promise — can be awaited when needed
-  return idbSet(IDB_KEY, JSON.parse(JSON.stringify(S))).catch(e => console.error('Save error', e));
+  // Save app state + pending queue together
+  var snapshot = JSON.parse(JSON.stringify(S));
+  snapshot._pendingQueue = syncQueue.slice();
+  return idbSet(IDB_KEY, snapshot).catch(e => console.error('Save error', e));
 }
 
 function setSdot(visible) {
@@ -3473,13 +3480,18 @@ async function runQ() {
   while (syncQueue.length > 0) {
     const item = syncQueue.shift();
     try {
-      // Apps Script requires no-cors for POST (redirect-based auth)
+      // action: 'save' for new, 'update' for edits
+      var action = 'save';
+      var recType = item.type;
+      if (item.type.startsWith('update_')) {
+        action = 'update';
+        recType = item.type.replace('update_', '');
+      }
       await fetch(S.sheetUrl, {
         method: 'POST',
         mode: 'no-cors',
-        body: JSON.stringify({ action: 'save', type: item.type, data: item.data })
+        body: JSON.stringify({ action: action, type: recType, data: item.data })
       });
-      // no-cors always succeeds (opaque response) — assume success
     } catch(e) {
       // network failure — re-queue
       syncQueue.unshift(item);
@@ -3653,19 +3665,29 @@ function loadArchivedFirms() {
     .then(r => r.json())
     .then(data => {
       if (!data.firms || !data.firms.length) {
-        list.innerHTML = '<span style="color:var(--text3)">কোনো archive নেই।</span>';
+        list.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text3);font-size:12px">কোনো মুছে ফেলা খামার নেই।</div>';
         return;
       }
-      list.innerHTML = data.firms.map(f =>
-        `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
-          <div>
-            <div style="font-size:13px;font-weight:700;color:var(--text)">🏠 ${esc(f.firmName)}</div>
-            <div style="font-size:10px;color:var(--text3)">${f.recordCount} রেকর্ড &nbsp;·&nbsp; ${fmt(String(f.archivedAt).slice(0,10))}</div>
+      list.innerHTML = data.firms.map(f => {
+        var deleteDate = fmtD(String(f.archivedAt).slice(0,10));
+        var firstStock = f.firstStockDate ? fmtD(String(f.firstStockDate).slice(0,10)) : '—';
+        var enc = encodeURIComponent(f.firmId);
+        var encName = encodeURIComponent(f.firmName);
+        return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+            <div>
+              <div style="font-size:13px;font-weight:700;color:var(--text)">🏠 ${esc(f.firmName)}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">${firstStock} → ${deleteDate}</div>
+            </div>
           </div>
-          <button class="btn btn-secondary" style="font-size:11px;min-height:32px;padding:0 12px;color:var(--accent)"
-            onclick="restoreFirmFromArchive('${f.firmId}','${esc(f.firmName)}')">↩ Restore</button>
-        </div>`
-      ).join('');
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-secondary" style="flex:1;font-size:12px;min-height:34px;color:var(--accent);border-color:var(--accent)"
+              onclick="restoreFirmFromArchive(decodeURIComponent('${enc}'),decodeURIComponent('${encName}'))">↩ পুনরুদ্ধার করুন</button>
+            <button class="btn btn-danger" style="flex:1;font-size:12px;min-height:34px"
+              onclick="confirmPermDeleteFirm(decodeURIComponent('${enc}'),decodeURIComponent('${encName}'))">🗑 স্থায়ীভাবে মুছুন</button>
+          </div>
+        </div>`;
+      }).join('');
     })
     .catch(() => { list.innerHTML = '<span style="color:#e05050">লোড ব্যর্থ।</span>'; });
 }
@@ -3691,6 +3713,31 @@ async function restoreFirmFromArchive(firmId, firmName) {
     toast(`${firmName} সফলভাবে restore হয়েছে ✓`, 'success');
   } catch(e) {
     list.innerHTML = '<span style="color:#e05050">Restore ব্যর্থ। আবার চেষ্টা করুন।</span>';
+  }
+}
+
+function confirmPermDeleteFirm(firmId, firmName) {
+  if (!confirm(firmName + ' খামারটি এবং এর সব ডেটা স্থায়ীভাবে মুছে ফেলা হবে। এই কাজটি ফেরানো যাবে না। নিশ্চিত?')) return;
+  permanentDeleteFirmExec(firmId, firmName);
+}
+
+async function permanentDeleteFirmExec(firmId, firmName) {
+  const list = document.getElementById('archive-list');
+  list.innerHTML = `<span style="color:var(--text3)">${esc(firmName)} স্থায়ীভাবে মুছে ফেলা হচ্ছে...</span>`;
+  try {
+    await fetch(S.sheetUrl, {
+      method: 'POST', mode: 'no-cors',
+      body: JSON.stringify({ action: 'permanent_delete_firm', firmId })
+    });
+    // Remove from local deletedFirmIds
+    S.deletedFirmIds = (S.deletedFirmIds||[]).filter(id => id !== firmId);
+    // Also remove from local deletedFirms list if exists
+    if (S.deletedFirms) S.deletedFirms = S.deletedFirms.filter(f => f.id !== firmId);
+    save();
+    toast(firmName + ' স্থায়ীভাবে মুছে ফেলা হয়েছে', 'success');
+    loadArchivedFirms();
+  } catch(e) {
+    list.innerHTML = '<span style="color:#e05050">মুছে ফেলা ব্যর্থ। আবার চেষ্টা করুন।</span>';
   }
 }
 
@@ -5404,13 +5451,8 @@ function saveEditHist() {
 }
 
 function syncUpdateToSheet(recordType, data) {
-  if (!S.sheetUrl) return;
-  fetch(S.sheetUrl, {
-    method: 'POST',
-    mode: 'no-cors',
-    headers: {'Content-Type': 'text/plain'},
-    body: JSON.stringify({ action: 'update', type: recordType, data: data })
-  }).catch(()=>{});
+  // Use the queue so offline edits are retried when online
+  push('update_'+recordType, data);
 }
 
 function gasRecordType(t) {
@@ -6465,10 +6507,12 @@ async function init() {
     }
   }
 
-  // When coming back online, auto-sync
+  // When coming back online, flush queue then pull
   window.addEventListener('online', () => {
     toast('নেটওয়ার্ক ফিরে এসেছে, সিঙ্ক হচ্ছে...', 'info', 2000);
-    setTimeout(doPull, 500);
+    setTimeout(() => {
+      runQ().then(() => doPull()).catch(() => doPull());
+    }, 500);
   });
 
   window.addEventListener('offline', () => {
