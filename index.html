@@ -3139,6 +3139,10 @@ html, body { height: 100%; overflow: hidden; }
           <div class="settings-label">Last Sync</div>
           <div style="font-size:13px;color:var(--text2)" id="settings-last-sync">কখনো সিঙ্ক হয়নি</div>
         </div>
+        <div class="settings-field" style="margin-top:12px">
+          <button class="btn btn-secondary" style="width:100%;color:var(--accent);border-color:var(--accent)" onclick="doHardSync()">🔄 Hard Sync — সব ডেটা নতুন করে লোড করুন</button>
+          <div style="font-size:10px;color:var(--text3);margin-top:4px;text-align:center">প্রতি মাসে ১-২ বার করুন। সময় লাগতে পারে।</div>
+        </div>
         <!-- Archive Restore Section -->
         <div class="settings-field" style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -3385,10 +3389,14 @@ function setSyncBar(visible, text, isError) {
   }
 }
 
-async function pull() {
+async function pull(hardSync) {
   if (!S.sheetUrl) return;
   try {
-    const url = S.sheetUrl + '?action=getAll&t=' + Date.now();
+    // Incremental: only fetch records updated since last sync
+    // Hard sync: fetch everything
+    var since = (!hardSync && S.lastSync) ? S.lastSync : '';
+    var url = S.sheetUrl + '?action=getAll&t=' + Date.now() + '&r=' + Math.random().toString(36).slice(2);
+    if (since) url += '&since=' + encodeURIComponent(since);
     const resp = await fetch(url, { cache: 'no-store' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
@@ -3418,9 +3426,7 @@ async function pull() {
         data.records.forEach(r => {
           const idx = S.records.findIndex(x => x.id === r.id);
           if (idx === -1) { S.records.push(r); changed = true; }
-          else if (JSON.stringify(S.records[idx]) !== JSON.stringify(r)) {
-            S.records[idx] = r; changed = true;
-          }
+          else { S.records[idx] = r; changed = true; } // always take server version
         });
       }
       if (Array.isArray(data.stockEvents)) {
@@ -3428,9 +3434,7 @@ async function pull() {
         data.stockEvents.forEach(r => {
           const idx = S.stockEvents.findIndex(x => x.id === r.id);
           if (idx === -1) { S.stockEvents.push(r); changed = true; }
-          else if (JSON.stringify(S.stockEvents[idx]) !== JSON.stringify(r)) {
-            S.stockEvents[idx] = r; changed = true;
-          }
+          else { S.stockEvents[idx] = r; changed = true; }
         });
       }
       if (Array.isArray(data.weightRecords)) {
@@ -3451,20 +3455,19 @@ async function pull() {
           }
           const wIdx = S.weightRecords.findIndex(x => x.id === r.id);
           if (wIdx === -1) { S.weightRecords.push(r); changed = true; }
-          else if (JSON.stringify(S.weightRecords[wIdx]) !== JSON.stringify(r)) {
-            S.weightRecords[wIdx] = r; changed = true;
-          }
+          else { S.weightRecords[wIdx] = r; changed = true; }
         });
       }
+      // Always update lastSync — even if no new data
+      S.lastSync = new Date().toISOString();
       if (changed) {
-        S.lastSync = new Date().toISOString();
         migrateFirmFish();
         await save();
         if (currentPage === 'home') renderHome();
         if (currentPage === 'history') { buildFirmFilter(); renderHistoryKeepOpen(); }
         if (currentPage === 'report')  { buildFirmRow(); renderTab(); }
       } else {
-        // Even if no changes, re-render home to show cached data
+        await save(); // save updated lastSync
         if (currentPage === 'home') renderHome();
       }
       setSyncBar(false);
@@ -5985,18 +5988,14 @@ function renderCost(){
   if(!S.feedCosts[rFirmId])S.feedCosts[rFirmId]={};
   if(!S.medCosts[rFirmId])S.medCosts[rFirmId]={};
 
-  var fRecs=S.records.filter(function(r){return r.firmId===rFirmId&&r.type==='feed'&&r.date>=costFrom&&r.date<=costTo;});
-  var mRecs=S.records.filter(function(r){return r.firmId===rFirmId&&r.type==='medicine'&&r.date>=costFrom&&r.date<=costTo;});
+  // All records for this firm — no date filter
+  var fRecs=S.records.filter(function(r){return r.firmId===rFirmId&&r.type==='feed';});
+  var mRecs=S.records.filter(function(r){return r.firmId===rFirmId&&r.type==='medicine';});
 
   var fKg={};fRecs.forEach(function(r){Object.entries(r.amounts||{}).forEach(function(e){fKg[e[0]]=(fKg[e[0]]||0)+Number(e[1]);});});
   var mGm={};mRecs.forEach(function(r){Object.entries(r.amounts||{}).forEach(function(e){mGm[e[0]]=(mGm[e[0]]||0)+Number(e[1]);});});
 
-  var flt='<div class="date-filter-row">'
-    +'<span class="date-filter-lbl">তারিখ:</span>'
-    +'<input type="date" class="date-inp" value="'+costFrom+'" onchange="costFrom=this.value;renderCost()" style="color-scheme:dark">'
-    +'<span class="date-sep">—</span>'
-    +'<input type="date" class="date-inp" value="'+costTo+'" onchange="costTo=this.value;renderCost()" style="color-scheme:dark">'
-    +'</div>';
+  var flt='';
 
   // Feed table
   var fTotal=0;
@@ -6009,7 +6008,7 @@ function renderCost(){
       +'<td class="r">'+(rate>0?'৳ '+mfmt(tot):'<span style="color:var(--text3)">—</span>')+'</td>'
       +'</tr>';
   }).join('');
-  if(!fRows)fRows='<tr><td colspan="4" style="text-align:center;color:var(--text3);font-size:12px;padding:16px">এই সময়ে Feed রেকর্ড নেই</td></tr>';
+  if(!fRows)fRows='<tr><td colspan="4" style="text-align:center;color:var(--text3);font-size:12px;padding:16px">কোনো Feed রেকর্ড নেই</td></tr>';
   var fKgSum=Object.values(fKg).reduce(function(a,b){return a+b;},0);
   fRows+='<tr class="sum-row"><td>Feed সর্বমোট</td><td class="r">'+n0(fKgSum)+' kg</td><td></td><td class="r">৳ '+mfmt(fTotal)+'</td></tr>';
 
@@ -6024,7 +6023,7 @@ function renderCost(){
       +'<td class="r">'+(rate>0?'৳ '+mfmt(tot):'<span style="color:var(--text3)">—</span>')+'</td>'
       +'</tr>';
   }).join('');
-  if(!mRows)mRows='<tr><td colspan="4" style="text-align:center;color:var(--text3);font-size:12px;padding:16px">এই সময়ে Medicine রেকর্ড নেই</td></tr>';
+  if(!mRows)mRows='<tr><td colspan="4" style="text-align:center;color:var(--text3);font-size:12px;padding:16px">কোনো Medicine রেকর্ড নেই</td></tr>';
   var mGmSum=Object.values(mGm).reduce(function(a,b){return a+b;},0);
   mRows+='<tr class="sum-row"><td>Medicine সর্বমোট</td><td class="r">'+n0(mGmSum)+' gm</td><td></td><td class="r">৳ '+mfmt(mTotal)+'</td></tr>';
 
@@ -6046,7 +6045,7 @@ function renderCost(){
     +'<div class="tbl-wrap" style="margin-top:14px"><table class="data-tbl"><thead><tr><th>ওষুধ</th><th class="r">gm</th><th class="r">৳/gm</th><th class="r">মোট ৳</th></tr></thead><tbody>'+mRows+'</tbody></table></div>'
     +grandBox;
 
-  document.getElementById('rpt-body').innerHTML=mkCard('💰','ri-purple','খরচ হিসাব','Cost Report (Date Range)',body)
+  document.getElementById('rpt-body').innerHTML=mkCard('💰','ri-purple','খরচ হিসাব','শুরু থেকে এখন পর্যন্ত সর্বমোট',body)
     + renderFeedCostPerKgCard(rFirmId);
 }
 
@@ -7440,6 +7439,20 @@ function saveHarvestTarget(fishName, val) {
   S.harvestTargets[rFirmId][fishName] = parseFloat(val) || 0;
   save();
   renderAnalytics();
+}
+
+async function doHardSync() {
+  if (!S.sheetUrl) { toast('Sheet URL সেট করুন', 'warn'); return; }
+  closeModal('settings-modal');
+  setSyncBar(true, 'Hard Sync হচ্ছে — সব ডেটা লোড হচ্ছে...');
+  try {
+    await pull(true); // force full sync
+    toast('Hard Sync সম্পন্ন ✓', 'success');
+  } catch(e) {
+    toast('Hard Sync ব্যর্থ', 'error');
+  } finally {
+    setSyncBar(false);
+  }
 }
 
 function setSgrFish(encodedName) {
