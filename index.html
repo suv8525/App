@@ -3490,9 +3490,13 @@ async function push(type, data) {
 
 async function runQ() {
   if (isSyncing || !syncQueue.length || !S.sheetUrl) return;
+  // Don't run if offline — keep queue for later
+  if (!navigator.onLine) { setSdot(true); return; }
   isSyncing = true;
   setSdot(true);
   while (syncQueue.length > 0) {
+    // Stop if gone offline mid-sync
+    if (!navigator.onLine) { setSdot(true); break; }
     const item = syncQueue.shift();
     try {
       var action = 'save';
@@ -3502,14 +3506,27 @@ async function runQ() {
         recType = item.type.replace('update_', '');
       }
       var payload = JSON.stringify({ action: action, type: recType, data: item.data });
-      // Use fetch with no-cors; payload also sent as URL param as fallback
       var url = S.sheetUrl + '?payload=' + encodeURIComponent(payload);
-      await fetch(url, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain' },
-        body: payload
-      });
+      // Use a fetch with a timeout — no-cors never throws so we rely on onLine check
+      var controller = new AbortController();
+      var timer = setTimeout(() => controller.abort(), 10000);
+      try {
+        await fetch(url, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain' },
+          body: payload,
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+      } catch(fetchErr) {
+        clearTimeout(timer);
+        // Network error or abort — re-queue and stop
+        syncQueue.unshift(item);
+        break;
+      }
+      // Small delay between requests
+      await new Promise(r => setTimeout(r, 300));
     } catch(e) {
       syncQueue.unshift(item);
       break;
@@ -3517,6 +3534,8 @@ async function runQ() {
   }
   isSyncing = false;
   setSdot(syncQueue.length > 0);
+  // Persist queue to IndexedDB
+  save();
 }
 
 
