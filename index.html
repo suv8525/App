@@ -6125,6 +6125,19 @@ function saveMedCost(type,val){
   S.medCosts[rFirmId][type]=parseFloat(val)||0;save();renderCost();
 }
 
+// Event delegation for fish comparison harvest target input
+document.addEventListener('change', function(e){
+  if (e.target.classList.contains('comp-harvest-inp')) {
+    var fishName = decodeURIComponent(e.target.dataset.fish||'');
+    if (!fishName) return;
+    if (!S.harvestTargetsPpk) S.harvestTargetsPpk = {};
+    if (!S.harvestTargetsPpk[rFirmId]) S.harvestTargetsPpk[rFirmId] = {};
+    S.harvestTargetsPpk[rFirmId][fishName] = parseFloat(e.target.value)||0;
+    save();
+    renderAnalytics();
+  }
+}, true);
+
 // Event delegation for archive restore/delete buttons
 document.addEventListener('click', function(e){
   var restoreBtn = e.target.closest('.arch-restore-btn');
@@ -7449,7 +7462,142 @@ function renderAnalytics() {
     );
   }
 
-  document.getElementById('rpt-body').innerHTML = fcrHtml + sgrHtml + harvestHtml;
+  // ─────────────────────────────────────────────
+  // 4. Fish Performance Comparison
+  // ─────────────────────────────────────────────
+  var compHtml = '';
+  var allFishComp = getFishTypes(firm);
+
+  if (allFishComp.length > 0 && wtRecs.length >= 1) {
+    if (!S.harvestTargetsPpk) S.harvestTargetsPpk = {};
+    if (!S.harvestTargetsPpk[rFirmId]) S.harvestTargetsPpk[rFirmId] = {};
+
+    var rows = allFishComp.map(function(fishName) {
+      // Initial wpp from stock entry
+      var initWpp = getInitialWppFromStock(fishName, wtRecs[0].date);
+      var initPpk = initWpp > 0 ? parseFloat((1/initWpp).toFixed(2)) : null;
+
+      // Latest wpp from weight records (carry-forward)
+      var latestWpp = wppForFishAt(fishName, wtRecs.length - 1);
+      var latestPpk = latestWpp > 0 ? parseFloat((1/latestWpp).toFixed(2)) : null;
+
+      // Growth % = (latestWpp - initWpp) / initWpp * 100
+      var growthPct = (initWpp > 0 && latestWpp > 0)
+        ? parseFloat(((latestWpp - initWpp) / initWpp * 100).toFixed(1)) : null;
+
+      // SGR from stock date to latest weight
+      var stockDate = firstStockDate();
+      var latestDate = wtRecs[wtRecs.length-1].date;
+      var totalDays = stockDate ? daysBetween(stockDate, latestDate) : 0;
+      var sgr = (initWpp > 0 && latestWpp > 0 && totalDays > 0)
+        ? parseFloat(((Math.log(latestWpp) - Math.log(initWpp)) / totalDays * 100).toFixed(3)) : null;
+
+      // Current pcs/kg and pcs
+      var curPcs = getCurrentStock(rFirmId, fishName);
+      var curBiomass = latestWpp > 0 ? parseFloat((curPcs * latestWpp).toFixed(1)) : 0;
+
+      // Harvest target (pcs/kg) → target wpp
+      var targetPpk = S.harvestTargetsPpk[rFirmId][fishName] || 0;
+      var daysToHarvest = null;
+      if (targetPpk > 0 && sgr && sgr > 0 && latestWpp > 0) {
+        var targetWpp = 1 / targetPpk;
+        if (targetWpp > latestWpp) {
+          daysToHarvest = Math.ceil(Math.log(targetWpp / latestWpp) / (sgr / 100));
+        } else {
+          daysToHarvest = 0; // already reached
+        }
+      }
+
+      // Color based on SGR
+      var sgrColor = sgr === null ? 'var(--text3)' : sgr >= 1.5 ? 'var(--accent)' : sgr >= 0.8 ? 'var(--warn)' : '#e05050';
+      var growthColor = growthPct === null ? 'var(--text3)' : growthPct >= 100 ? 'var(--accent)' : growthPct >= 50 ? 'var(--warn)' : '#e05050';
+
+      var enc = encodeURIComponent(fishName);
+
+      return '<div style="padding:12px 0;border-bottom:1px solid var(--border)">'
+        // Fish name + biomass
+        +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+        +'<div style="font-size:14px;font-weight:700;color:var(--text)">🐟 '+esc(fishName)+'</div>'
+        +'<div style="font-size:11px;color:var(--text3)">'+curPcs+' পিস &nbsp;·&nbsp; '+curBiomass+' kg</div>'
+        +'</div>'
+        // Stats row
+        +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">'
+        // Initial wpp
+        +'<div style="background:var(--card2);border-radius:8px;padding:6px 8px;text-align:center">'
+        +'<div style="font-size:9px;color:var(--text3)">শুরুর পিস/kg</div>'
+        +'<div style="font-size:13px;font-weight:700;color:var(--text)">'+(initPpk !== null ? initPpk : '—')+'</div>'
+        +'</div>'
+        // Current wpp
+        +'<div style="background:var(--card2);border-radius:8px;padding:6px 8px;text-align:center">'
+        +'<div style="font-size:9px;color:var(--text3)">বর্তমান পিস/kg</div>'
+        +'<div style="font-size:13px;font-weight:700;color:var(--text)">'+(latestPpk !== null ? latestPpk : '—')+'</div>'
+        +'</div>'
+        // Growth %
+        +'<div style="background:var(--card2);border-radius:8px;padding:6px 8px;text-align:center">'
+        +'<div style="font-size:9px;color:var(--text3)">Growth</div>'
+        +'<div style="font-size:13px;font-weight:700;color:'+growthColor+'">'+(growthPct !== null ? (growthPct > 0 ? '+' : '')+growthPct+'%' : '—')+'</div>'
+        +'</div>'
+        +'</div>'
+        // SGR row
+        +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">'
+        +'<div style="background:var(--card2);border-radius:8px;padding:6px 8px;text-align:center">'
+        +'<div style="font-size:9px;color:var(--text3)">SGR (শুরু থেকে)</div>'
+        +'<div style="font-size:13px;font-weight:700;color:'+sgrColor+'">'+(sgr !== null ? sgr+'%/day' : '—')+'</div>'
+        +'</div>'
+        +'<div style="background:var(--card2);border-radius:8px;padding:6px 8px;text-align:center">'
+        +'<div style="font-size:9px;color:var(--text3)">মোট দিন</div>'
+        +'<div style="font-size:13px;font-weight:700;color:var(--text)">'+(totalDays > 0 ? totalDays+' দিন' : '—')+'</div>'
+        +'</div>'
+        +'</div>'
+        // Harvest target input
+        +'<div style="display:flex;align-items:center;gap:8px">'
+        +'<span style="font-size:11px;color:var(--text2);white-space:nowrap">বিক্রির লক্ষ্য:</span>'
+        +'<input type="number" min="1" placeholder="পিস/kg" value="'+(targetPpk||'')+'" '
+        +'data-fish="'+enc+'" class="comp-harvest-inp" '
+        +'style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid var(--border2);background:var(--card2);color:var(--text);font-size:12px"> পিস/kg'
+        +'</div>'
+        +(daysToHarvest !== null
+          ? '<div style="font-size:11px;margin-top:6px;padding:6px 10px;background:rgba(0,168,126,0.08);border-radius:6px;border:1px solid rgba(0,168,126,0.2)">'
+            +(daysToHarvest === 0
+              ? '✅ লক্ষ্যমাত্রা পৌঁছে গেছে — এখনই বিক্রি করা যাবে'
+              : '📅 আনুমানিক <strong>'+daysToHarvest+' দিন</strong> পরে লক্ষ্যমাত্রায় পৌঁছাবে ('
+                +fmtD(new Date(Date.now()+daysToHarvest*86400000).toISOString().slice(0,10))+')')
+            +'</div>'
+          : '')
+        +'</div>';
+    }).join('');
+
+    // Best performer highlight
+    var scored = allFishComp.map(function(fishName) {
+      var initWpp = getInitialWppFromStock(fishName, wtRecs[0].date);
+      var latestWpp = wppForFishAt(fishName, wtRecs.length - 1);
+      var stockDate = firstStockDate();
+      var totalDays = stockDate ? daysBetween(stockDate, wtRecs[wtRecs.length-1].date) : 0;
+      var sgr = (initWpp > 0 && latestWpp > 0 && totalDays > 0)
+        ? parseFloat(((Math.log(latestWpp) - Math.log(initWpp)) / totalDays * 100).toFixed(3)) : 0;
+      return { name: fishName, sgr: sgr };
+    }).filter(function(f){ return f.sgr > 0; })
+      .sort(function(a,b){ return b.sgr - a.sgr; });
+
+    var bestHtml = '';
+    if (scored.length > 0) {
+      bestHtml = '<div style="margin-bottom:12px;padding:10px;background:rgba(0,168,126,0.08);border-radius:8px;border:1px solid rgba(0,168,126,0.2)">'
+        +'<div style="font-size:11px;color:var(--text3);margin-bottom:4px">🏆 সেরা growth rate</div>'
+        +'<div style="font-size:14px;font-weight:700;color:var(--accent)">'+esc(scored[0].name)+'</div>'
+        +'<div style="font-size:11px;color:var(--text3)">SGR: '+scored[0].sgr+'%/day'
+        +(scored.length > 1 ? ' &nbsp;·&nbsp; পরের: '+esc(scored[1].name)+' ('+scored[1].sgr+'%/day)' : '')
+        +'</div>'
+        +(scored.length > 0 ? '<div style="font-size:10px;color:var(--text3);margin-top:4px">👉 আগামী season এ <strong>'+esc(scored[0].name)+'</strong> বেশি ছাড়ার কথা বিবেচনা করুন</div>' : '')
+        +'</div>';
+    }
+
+    compHtml = mkCard('🔬','ri-purple','মাছের তুলনা','Growth ও Harvest Analysis',
+      bestHtml + rows
+    );
+  }
+
+  // Event delegation for harvest target input
+  document.getElementById('rpt-body').innerHTML = fcrHtml + sgrHtml + harvestHtml + compHtml;
 }
 
 function saveHarvestTarget(fishName, val) {
