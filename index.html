@@ -3143,6 +3143,13 @@ html, body { height: 100%; overflow: hidden; }
           <button class="btn btn-secondary" style="width:100%;color:var(--accent);border-color:var(--accent)" onclick="doHardSync()">🔄 Hard Sync — সব ডেটা নতুন করে লোড করুন</button>
           <div style="font-size:10px;color:var(--text3);margin-top:4px;text-align:center">প্রতি মাসে ১-২ বার করুন। সময় লাগতে পারে।</div>
         </div>
+        <!-- Gemini API Key -->
+        <div class="settings-field" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px">
+          <label class="settings-label">Gemini API Key</label>
+          <input type="password" class="settings-input" id="settings-gemini-key" placeholder="AIzaSy..." autocomplete="off">
+          <div class="settings-hint">Google AI Studio থেকে নিন — AI বিশ্লেষণের জন্য</div>
+        </div>
+
         <!-- Archive Restore Section -->
         <div class="settings-field" style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -3216,7 +3223,7 @@ let S = {
   feedStock: [],          // feed brought to pond-side storage
   pondVolume: {},         // {firmId: m3}
   densityRef: {},         // {firmId: {fishName: maxKgPerM3}}
-  sheetUrl: 'https://script.google.com/macros/s/AKfycbwY22arLTVh-xoMphv1_3uNq0mmQ2rcSQxIut6ikBflAf3zQ7_axqY4ANDT2RiXSbwB/exec', lastSync: null
+  sheetUrl: 'https://script.google.com/macros/s/AKfycbwY22arLTVh-xoMphv1_3uNq0mmQ2rcSQxIut6ikBflAf3zQ7_axqY4ANDT2RiXSbwB/exec', lastSync: null, geminiKey: ''
 };
 let currentPage = 'home';
 let pageStack   = [];
@@ -3798,10 +3805,12 @@ function closeModal(id) {
 function openSettings() {
   const urlEl    = document.getElementById('settings-sheet-url');
   const syncEl   = document.getElementById('settings-last-sync');
+  const gemEl    = document.getElementById('settings-gemini-key');
   const modalEl  = document.getElementById('modal-settings');
   if (!modalEl) { toast('Settings modal not found', 'error'); return; }
   if(!S.sheetUrl) { S.sheetUrl='https://script.google.com/macros/s/AKfycbwY22arLTVh-xoMphv1_3uNq0mmQ2rcSQxIut6ikBflAf3zQ7_axqY4ANDT2RiXSbwB/exec'; save(); }
   if (urlEl) urlEl.value = S.sheetUrl || '';
+  if (gemEl) gemEl.value = S.geminiKey || '';
   if (syncEl) syncEl.textContent = S.lastSync
     ? new Date(S.lastSync).toLocaleString('bn-BD')
     : 'কখনো সিঙ্ক হয়নি';
@@ -3812,6 +3821,8 @@ function openSettings() {
 function saveSettings() {
   const url = document.getElementById('settings-sheet-url').value.trim();
   S.sheetUrl = url;
+  const gemKey = document.getElementById('settings-gemini-key')?.value?.trim();
+  if (gemKey !== undefined) S.geminiKey = gemKey;
   save();
   closeModal('modal-settings');
   toast('সেটিংস সংরক্ষিত হয়েছে ✓', 'success');
@@ -6970,8 +6981,9 @@ function renderAnalytics() {
   // For each fish, find the FIRST stock event before or on wtRecs[idx].date
   // and use its pcsPerKg as the baseline wpp.
   function getInitialWppFromStock(fishName, beforeDate) {
+    // Find the FIRST stock entry for this specific fish (regardless of beforeDate limit)
     var stockEvts = (S.stockEvents||[])
-      .filter(function(ev){ return ev.firmId===rFirmId && ev.type==='নতুন চারা ছাড়া' && ev.date<=beforeDate; })
+      .filter(function(ev){ return ev.firmId===rFirmId && ev.type==='নতুন চারা ছাড়া'; })
       .sort(function(a,b){ return a.date.localeCompare(b.date); });
     for (var si=0; si<stockEvts.length; si++) {
       var entries = stockEvts[si].entries||[];
@@ -6982,6 +6994,17 @@ function renderAnalytics() {
       }
     }
     return 0;
+  }
+
+  // Get the first stock date for a specific fish
+  function firstStockDateForFish(fishName) {
+    var evts = (S.stockEvents||[])
+      .filter(function(ev){
+        return ev.firmId===rFirmId && ev.type==='নতুন চারা ছাড়া'
+          && (ev.entries||[]).some(function(e){ return e.fishName===fishName; });
+      })
+      .sort(function(a,b){ return a.date.localeCompare(b.date); });
+    return evts.length > 0 ? evts[0].date : null;
   }
 
   // ── Helper: get biomass kg at a given weight record index ──
@@ -7485,10 +7508,10 @@ function renderAnalytics() {
       var growthPct = (initWpp > 0 && latestWpp > 0)
         ? parseFloat(((latestWpp - initWpp) / initWpp * 100).toFixed(1)) : null;
 
-      // SGR from stock date to latest weight
-      var stockDate = firstStockDate();
+      // SGR from THIS fish's stock date to latest weight record for this fish
+      var fishStockDate = firstStockDateForFish(fishName);
       var latestDate = wtRecs[wtRecs.length-1].date;
-      var totalDays = stockDate ? daysBetween(stockDate, latestDate) : 0;
+      var totalDays = fishStockDate ? daysBetween(fishStockDate, latestDate) : 0;
       var sgr = (initWpp > 0 && latestWpp > 0 && totalDays > 0)
         ? parseFloat(((Math.log(latestWpp) - Math.log(initWpp)) / totalDays * 100).toFixed(3)) : null;
 
@@ -7546,7 +7569,7 @@ function renderAnalytics() {
         +'</div>'
         +'<div style="background:var(--card2);border-radius:8px;padding:6px 8px;text-align:center">'
         +'<div style="font-size:9px;color:var(--text3)">মোট দিন</div>'
-        +'<div style="font-size:13px;font-weight:700;color:var(--text)">'+(totalDays > 0 ? totalDays+' দিন' : '—')+'</div>'
+        +'<div style="font-size:13px;font-weight:700;color:var(--text)">'+(totalDays > 0 ? totalDays+' দিন' : (fishStockDate ? daysBetween(fishStockDate, tod())+' দিন' : '—'))+'</div>'
         +'</div>'
         +'</div>'
         // Harvest target input
@@ -7573,8 +7596,10 @@ function renderAnalytics() {
       var latestWpp = wppForFishAt(fishName, wtRecs.length - 1);
       var stockDate = firstStockDate();
       var totalDays = stockDate ? daysBetween(stockDate, wtRecs[wtRecs.length-1].date) : 0;
-      var sgr = (initWpp > 0 && latestWpp > 0 && totalDays > 0)
-        ? parseFloat(((Math.log(latestWpp) - Math.log(initWpp)) / totalDays * 100).toFixed(3)) : 0;
+      var fsd = firstStockDateForFish(fishName);
+      var td = fsd ? daysBetween(fsd, wtRecs[wtRecs.length-1].date) : 0;
+      var sgr = (initWpp > 0 && latestWpp > 0 && td > 0)
+        ? parseFloat(((Math.log(latestWpp) - Math.log(initWpp)) / td * 100).toFixed(3)) : 0;
       return { name: fishName, sgr: sgr };
     }).filter(function(f){ return f.sgr > 0; })
       .sort(function(a,b){ return b.sgr - a.sgr; });
@@ -7591,13 +7616,92 @@ function renderAnalytics() {
         +'</div>';
     }
 
+    // AI Analysis button
+    var aiBtn = '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">'
+      +'<button onclick="runGeminiAnalysis()" style="width:100%;padding:10px;border-radius:10px;border:1.5px solid var(--accent);background:rgba(0,168,126,0.08);color:var(--accent);font-size:13px;font-weight:600;cursor:pointer">🤖 AI বিশ্লেষণ করুন</button>'
+      +'<div id="ai-analysis-result" style="margin-top:10px;font-size:12px;line-height:1.7;color:var(--text2)"></div>'
+      +'</div>';
+
     compHtml = mkCard('🔬','ri-purple','মাছের তুলনা','Growth ও Harvest Analysis',
-      bestHtml + rows
+      bestHtml + rows + aiBtn
     );
   }
 
   // Event delegation for harvest target input
   document.getElementById('rpt-body').innerHTML = fcrHtml + sgrHtml + harvestHtml + compHtml;
+}
+
+async function runGeminiAnalysis() {
+  if (!S.geminiKey) {
+    toast('Settings এ Gemini API Key দিন', 'warn');
+    openSettings();
+    return;
+  }
+  const resultEl = document.getElementById('ai-analysis-result');
+  if (!resultEl) return;
+  resultEl.innerHTML = '<span style="color:var(--text3)">🤖 বিশ্লেষণ করা হচ্ছে...</span>';
+
+  // Build data summary for the AI
+  const firm = S.firms.find(f => f.id === rFirmId);
+  const firmName = firm ? firm.name : '';
+  const allFish = getFishTypes(firm || {});
+  const wtRecs = (S.weightRecords||[]).filter(r=>r.firmId===rFirmId)
+    .sort((a,b)=>a.date.localeCompare(b.date));
+
+  var fishSummary = allFish.map(function(fishName) {
+    var initWpp = getInitialWppFromStock(fishName, wtRecs.length > 0 ? wtRecs[0].date : '9999');
+    var latestWpp = wtRecs.length > 0 ? wppForFishAt(fishName, wtRecs.length-1) : 0;
+    var stockDate = firstStockDate();
+    var latestDate = wtRecs.length > 0 ? wtRecs[wtRecs.length-1].date : '';
+    var totalDays = stockDate && latestDate ? daysBetween(stockDate, latestDate) : 0;
+    var sgr = (initWpp>0 && latestWpp>0 && totalDays>0)
+      ? ((Math.log(latestWpp)-Math.log(initWpp))/totalDays*100).toFixed(3) : null;
+    var initPpk = initWpp > 0 ? (1/initWpp).toFixed(1) : null;
+    var latestPpk = latestWpp > 0 ? (1/latestWpp).toFixed(1) : null;
+    var growthPct = (initWpp>0&&latestWpp>0) ? ((latestWpp-initWpp)/initWpp*100).toFixed(1) : null;
+    var curPcs = getCurrentStock(rFirmId, fishName);
+    return fishName+': শুরু='+initPpk+' পিস/kg, বর্তমান='+latestPpk+' পিস/kg, Growth='+growthPct+'%, SGR='+sgr+'%/day, পিস='+curPcs+', দিন='+totalDays;
+  }).join('\n');
+
+  // FCR summary
+  var feedTotal = (S.records||[]).filter(r=>r.firmId===rFirmId&&r.type==='feed')
+    .reduce(function(s,r){return s+Object.values(r.amounts||{}).reduce(function(a,b){return a+Number(b);},0);},0);
+
+  var prompt = 'আমি একজন মাছ চাষি। আমার "'+firmName+'" পুকুরের ডেটা:\n\n'
+    +fishSummary+'\n\n'
+    +'মোট Feed দেওয়া হয়েছে: '+feedTotal.toFixed(0)+' kg\n\n'
+    +'এই ডেটা বিশ্লেষণ করে বাংলায় বলুন:\n'
+    +'১. কোন মাছের performance সবচেয়ে ভালো এবং কেন\n'
+    +'২. কোন মাছে আগামী season এ বেশি বিনিয়োগ করা উচিত\n'
+    +'৩. কোনো সমস্যা বা উন্নতির সুযোগ আছে কিনা\n'
+    +'সংক্ষিপ্ত ও practical পরামর্শ দিন।';
+
+  try {
+    const resp = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+S.geminiKey,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 600, temperature: 0.4 }
+        })
+      }
+    );
+    const data = await resp.json();
+    if (data.candidates && data.candidates[0]) {
+      var text = data.candidates[0].content.parts[0].text || '';
+      // Format newlines
+      resultEl.innerHTML = '<div style="background:rgba(0,168,126,0.06);border-radius:8px;border:1px solid rgba(0,168,126,0.2);padding:12px">'
+        +'<div style="font-size:11px;color:var(--accent);font-weight:700;margin-bottom:6px">🤖 AI পরামর্শ</div>'
+        +text.replace(/\n/g,'<br>').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')
+        +'</div>';
+    } else if (data.error) {
+      resultEl.innerHTML = '<span style="color:#e05050">Error: '+esc(data.error.message)+'</span>';
+    }
+  } catch(e) {
+    resultEl.innerHTML = '<span style="color:#e05050">বিশ্লেষণ ব্যর্থ হয়েছে। API Key চেক করুন।</span>';
+  }
 }
 
 function saveHarvestTarget(fishName, val) {
